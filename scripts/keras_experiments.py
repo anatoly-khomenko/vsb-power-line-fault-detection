@@ -220,7 +220,7 @@ if not os.path.exists('X.npy'):
     np.save("y.npy", y)
 else:
     X = np.load('X.npy')
-    Y = np.load('y.npy')
+    y = np.load('y.npy')
 
 # The X shape here is very important. It is also important undertand a little how a LSTM works
 # X.shape[0] is the number of id_measuremts contained in train data
