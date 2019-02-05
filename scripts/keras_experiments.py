@@ -258,35 +258,42 @@ def model_lstm(input_shape):
 
 
 # Here is where the training happens
+if not os.path.exists('preds_val.npy'):
 
-# First, create a set of indexes of the 5 folds
-splits = list(StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=2019).split(X, y))
-preds_val = []
-y_val = []
-# Then, iteract with each fold
-# If you dont know, enumerate(['a', 'b', 'c']) returns [(0, 'a'), (1, 'b'), (2, 'c')]
-for idx, (train_idx, val_idx) in enumerate(splits):
-    K.clear_session() # I dont know what it do, but I imagine that it "clear session" :)
-    print("Beginning fold {}".format(idx+1))
-    # use the indexes to extract the folds in the train and validation data
-    train_X, train_y, val_X, val_y = X[train_idx], y[train_idx], X[val_idx], y[val_idx]
-    # instantiate the model for this fold
-    model = model_lstm(train_X.shape)
-    # This checkpoint helps to avoid overfitting. It just save the weights of the model if it delivered an
-    # validation matthews_correlation greater than the last one.
-    ckpt = ModelCheckpoint('weights_{}.h5'.format(idx), save_best_only=True, save_weights_only=True, verbose=1, monitor='val_matthews_correlation', mode='max')
-    # Train, train, train
-    model.fit(train_X, train_y, batch_size=128, epochs=50, validation_data=[val_X, val_y], callbacks=[ckpt])
-    # loads the best weights saved by the checkpoint
-    model.load_weights('weights_{}.h5'.format(idx))
-    # Add the predictions of the validation to the list preds_val
-    preds_val.append(model.predict(val_X, batch_size=512))
-    # and the val true y
-    y_val.append(val_y)
+    # First, create a set of indexes of the 5 folds
+    splits = list(StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=2019).split(X, y))
+    preds_val = []
+    y_val = []
+    # Then, iteract with each fold
+    # If you dont know, enumerate(['a', 'b', 'c']) returns [(0, 'a'), (1, 'b'), (2, 'c')]
+    for idx, (train_idx, val_idx) in enumerate(splits):
+        K.clear_session() # I dont know what it do, but I imagine that it "clear session" :)
+        print("Beginning fold {}".format(idx+1))
+        # use the indexes to extract the folds in the train and validation data
+        train_X, train_y, val_X, val_y = X[train_idx], y[train_idx], X[val_idx], y[val_idx]
+        # instantiate the model for this fold
+        model = model_lstm(train_X.shape)
+        # This checkpoint helps to avoid overfitting. It just save the weights of the model if it delivered an
+        # validation matthews_correlation greater than the last one.
+        ckpt = ModelCheckpoint('weights_{}.h5'.format(idx), save_best_only=True, save_weights_only=True, verbose=1, monitor='val_matthews_correlation', mode='max')
+        # Train, train, train
+        model.fit(train_X, train_y, batch_size=128, epochs=50, validation_data=[val_X, val_y], callbacks=[ckpt])
+        # loads the best weights saved by the checkpoint
+        model.load_weights('weights_{}.h5'.format(idx))
+        # Add the predictions of the validation to the list preds_val
+        preds_val.append(model.predict(val_X, batch_size=512))
+        # and the val true y
+        y_val.append(val_y)
+    # concatenates all and prints the shape
+    preds_val = np.concatenate(preds_val)[..., 0]
+    y_val = np.concatenate(y_val)
+    np.save('preds_val.npy', preds_val)
+    np.save('y_val.npy', y_val)
+else:
+    preds_val = np.load('preds_val.npy')
+    y_val = np.load('y_val.npy')
 
-# concatenates all and prints the shape
-preds_val = np.concatenate(preds_val)[...,0]
-y_val = np.concatenate(y_val)
+
 print(preds_val.shape, y_val.shape)
 
 
@@ -331,19 +338,23 @@ start_end = [[x, x+part_size] for x in range(first_sig, max_line + first_sig, pa
 start_end = start_end[:-1] + [[start_end[-1][0], start_end[-1][0] + last_part]]
 print(start_end)
 X_test = []
-# now, very like we did above with the train data, we convert the test data part by part
-# transforming the 3 phases 800000 measurement in matrix (160,57)
-for start, end in start_end:
-    subset_test = pq.read_pandas('../../input/test.parquet', columns=[str(i) for i in range(start, end)]).to_pandas()
-    for i in tqdm(subset_test.columns):
-        id_measurement, phase = meta_test.loc[int(i)]
-        subset_test_col = subset_test[i]
-        subset_trans = transform_ts(subset_test_col)
-        X_test.append([i, id_measurement, phase, subset_trans])
 
+if not os.path.exists('X_test.npy'):
+    # now, very like we did above with the train data, we convert the test data part by part
+    # transforming the 3 phases 800000 measurement in matrix (160,57)
+    for start, end in start_end:
+        subset_test = pq.read_pandas('../../input/test.parquet', columns=[str(i) for i in range(start, end)]).to_pandas()
+        for i in tqdm(subset_test.columns):
+            id_measurement, phase = meta_test.loc[int(i)]
+            subset_test_col = subset_test[i]
+            subset_trans = transform_ts(subset_test_col)
+            X_test.append([i, id_measurement, phase, subset_trans])
 
-X_test_input = np.asarray([np.concatenate([X_test[i][3],X_test[i+1][3], X_test[i+2][3]], axis=1) for i in range(0,len(X_test), 3)])
-np.save("X_test.npy",X_test_input)
+    X_test_input = np.asarray([np.concatenate([X_test[i][3],X_test[i+1][3], X_test[i+2][3]], axis=1) for i in range(0,len(X_test), 3)])
+    np.save("X_test.npy", X_test_input)
+else:
+    X_test_input = np.load('X_test.npy')
+
 print(X_test_input.shape)
 
 
@@ -353,6 +364,7 @@ submission.head()
 
 
 preds_test = []
+model = model_lstm(X_test_input.shape)
 for i in range(N_SPLITS):
     model.load_weights('weights_{}.h5'.format(i))
     pred = model.predict(X_test_input, batch_size=300, verbose=1)
