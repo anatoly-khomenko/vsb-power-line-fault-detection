@@ -112,6 +112,7 @@ class Attention(Layer):
     def compute_output_shape(self, input_shape):
         return input_shape[0],  self.features_dim
 
+
 # just load train data
 df_train = pd.read_csv('../../input/metadata_train.csv')
 # set index, it makes the data access much faster
@@ -166,6 +167,7 @@ def transform_ts(ts, n_dim=160, min_max=(-1, 1)):
             [np.asarray([mean, std, std_top, std_bot, max_range]), percentil_calc, relative_percentile]))
     return np.asarray(new_ts)
 
+
 # this function take a piece of data and convert using transform_ts(), but it does to each of the 3 phases
 # if we would try to do in one time, could exceed the RAM Memmory
 def prep_data(start, end):
@@ -199,16 +201,26 @@ def prep_data(start, end):
 # this code is very simple, divide the total size of the df_train into two sets and process it
 X = []
 y = []
+
+
 def load_all():
     total_size = len(df_train)
     for ini, end in [(0, int(total_size/2)), (int(total_size/2), total_size)]:
         X_temp, y_temp = prep_data(ini, end)
         X.append(X_temp)
         y.append(y_temp)
-load_all()
-X = np.concatenate(X)
-y = np.concatenate(y)
 
+
+if not os.path.exists('X.npy'):
+    load_all()
+    X = np.concatenate(X)
+    y = np.concatenate(y)
+    # save data into file, a numpy specific format
+    np.save("X.npy", X)
+    np.save("y.npy", y)
+else:
+    X = np.load('X.npy')
+    Y = np.load('y.npy')
 
 # The X shape here is very important. It is also important undertand a little how a LSTM works
 # X.shape[0] is the number of id_measuremts contained in train data
@@ -217,9 +229,6 @@ y = np.concatenate(y)
 # a serie of inputs in a specifc order.
 # X.shape[3] is the number of features multiplied by the number of phases (3)
 print(X.shape, y.shape)
-# save data into file, a numpy specific format
-np.save("X.npy",X)
-np.save("y.npy",y)
 
 
 # This is NN LSTM Model creation

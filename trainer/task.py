@@ -148,8 +148,8 @@ def main(args):
     feature_columns = [
         # tf.feature_column.numeric_column(key='inception_v3', shape=2048, dtype=tf.float32),
         # tf.feature_column.numeric_column(key='signal', shape=800000, dtype=tf.int8),
-        tf.feature_column.numeric_column(key='input_1', shape=3040, dtype=tf.float32)
-        # tf.feature_column.numeric_column(key='stats', shape=3040, dtype=tf.float32),
+        # tf.feature_column.numeric_column(key='input_1', shape=3040, dtype=tf.float32)
+        tf.feature_column.numeric_column(key='stats', shape=3040, dtype=tf.float32),
         # tf.feature_column.numeric_column(key='weight', default_value=1, dtype=tf.int64)
     ]
     h_params = {
@@ -192,8 +192,8 @@ def main(args):
     #    config=run_config,
     #    params=h_params)
 
-    k_model = keras_model.model_lstm([eval_split, 160, 19])
-    estimator = keras_model.get_estimator(model=k_model, model_dir=args.output_dir, run_config=run_config)
+    # k_model = keras_model.model_lstm([eval_split, 160, 19])
+    # estimator = keras_model.get_estimator(model=k_model, model_dir=args.output_dir, run_config=run_config)
 
     # tf.estimator.train_and_evaluate(estimator, train_spec, eval_spec)
 
@@ -201,14 +201,14 @@ def main(args):
     #                                           model_dir=args.output_dir,
     #                                           config=run_config)
 
-    # estimator = tf.estimator.DNNClassifier(
-    #     feature_columns=feature_columns,
-    #     weight_column='weight',
-    #     hidden_units=[1024, 512],
-    #     model_dir=args.output_dir,
-    #     config=run_config,
-    #     batch_norm=True,
-    #     dropout=0.5)
+    estimator = tf.estimator.DNNClassifier(
+        feature_columns=feature_columns,
+        weight_column='weight',
+        hidden_units=[1024, 512],
+        model_dir=args.output_dir,
+        config=run_config,
+        batch_norm=True,
+        dropout=0.5)
 
     estimator = tf.contrib.estimator.add_metrics(estimator, custom_metrics)
 

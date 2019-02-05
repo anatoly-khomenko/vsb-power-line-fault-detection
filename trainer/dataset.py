@@ -140,14 +140,14 @@ def _input_fn(filename_queue, batch_size=1, take_count=None, skip_count=None, po
                 weight = tf.cond(tf.math.equal(target, 1), lambda: pos_weight, lambda: 1.0)
                 parsed['weight'] = weight
         parsed['signal'] = signal
-        parsed.pop('signal')
-        parsed.pop('spectrum')
-        parsed.pop('inception_v3')
-        parsed.pop('stats')
-        parsed.pop('weight')
-        parsed.pop('id_measurement')
-        parsed.pop('phase')
-        parsed.pop('signal_id')
+        # parsed.pop('signal')
+        # parsed.pop('spectrum')
+        # parsed.pop('inception_v3')
+        # parsed.pop('stats')
+        # parsed.pop('weight')
+        # parsed.pop('id_measurement')
+        # parsed.pop('phase')
+        # parsed.pop('signal_id')
         return parsed, target
 
     dataset = tf.data.TFRecordDataset(filenames=filename_queue, num_parallel_reads=8)
