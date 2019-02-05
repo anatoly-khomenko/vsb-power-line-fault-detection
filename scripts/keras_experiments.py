@@ -304,7 +304,8 @@ def threshold_search(y_true, y_proba):
     best_threshold = 0
     best_score = 0
     for threshold in tqdm([i * 0.01 for i in range(100)]):
-        score = K.eval(matthews_correlation(y_true.astype(np.float64), (y_proba > threshold).astype(np.float64)))
+        y_proba_bin = y_proba[y_proba > threshold]
+        score = K.eval(matthews_correlation(y_true.astype(np.float64), y_proba_bin.astype(np.float64)))
         if score > best_score:
             best_threshold = threshold
             best_score = score
