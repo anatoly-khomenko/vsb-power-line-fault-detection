@@ -2,14 +2,24 @@
   <dictionary name="anatoly">
     <words>
       <w>conv</w>
+      <w>crossentropy</w>
       <w>dataflow</w>
       <w>dataset</w>
+      <w>dtype</w>
       <w>gcloud</w>
+      <w>glorot</w>
       <w>keras</w>
       <w>logits</w>
+      <w>lstm</w>
       <w>nccl</w>
+      <w>numpys</w>
+      <w>paddings</w>
+      <w>parq</w>
+      <w>percentil</w>
       <w>pred</w>
       <w>pyarrow</w>
+      <w>regularizer</w>
+      <w>relu</w>
       <w>resized</w>
       <w>softmax</w>
       <w>tensorflow</w>

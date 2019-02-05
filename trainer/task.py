@@ -2,7 +2,11 @@ import argparse
 import os
 
 import tensorflow as tf
+from tqdm import tqdm
+from trainer import keras_model
+
 from trainer import model
+from trainer import dataset
 
 
 class MetadataProfilerHook(tf.train.SessionRunHook):
@@ -50,14 +54,18 @@ class MetadataProfilerHook(tf.train.SessionRunHook):
 
 
 def matthews_correlation(y_true, y_pred):
-
     cm = tf.confusion_matrix(y_true, y_pred)
+    if cm.shape[0] == 2 and cm.shape[1] == 2:
+        tp = cm[0][0]
+        tn = cm[1][1]
 
-    tp = cm[0][0]
-    tn = cm[1][1]
-
-    fp = cm[0][1]
-    fn = cm[1][0]
+        fp = cm[0][1]
+        fn = cm[1][0]
+    else:
+        tp = tf.constant(1E-9, dtype=tf.float32)
+        tn = tf.constant(1E-9, dtype=tf.float32)
+        fp = tf.constant(1E-9, dtype=tf.float32)
+        fn = tf.constant(1E-9, dtype=tf.float32)
 
     numerator = tf.cast((tp * tn - fp * fn), tf.float32)
     denominator = tf.sqrt(tf.cast((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn), tf.float32))
@@ -72,7 +80,7 @@ def custom_metrics(labels, predictions):
         'matthews_correlation': matthews_correlation(labels, predictions['class_ids'])
         # 'mean_labels': tf.metrics.mean(labels),
         # 'mean_predictions': tf.metrics.mean(predictions['class_ids'])
-        }
+    }
 
 
 def run_prediction(estimator, predict_input_fn, start_id, output_file_path):
@@ -82,8 +90,8 @@ def run_prediction(estimator, predict_input_fn, start_id, output_file_path):
 
     with open(output_file_path, 'w') as submission_file:
         submission_file.write('signal_id,target\n')
-        for prediction_dict in predictions_iterator:
-            class_id = prediction_dict['class_ids'][0]
+        for prediction_dict in tqdm(predictions_iterator):
+            class_id = prediction_dict['class_ids']
             total_positives_predicted = total_positives_predicted + class_id
             submission_file.write('%d,%d\n' % (signal_id, class_id))
             signal_id = signal_id + 1
@@ -96,11 +104,11 @@ def main(args):
     if args.use_fake_data:
         tf.set_random_seed(12345)
 
-    all_train_files = tf.gfile.Glob(os.path.join(args.data_dir, "Inception-V3-features-train.tfrecords"))
+    all_train_files = tf.gfile.Glob(os.path.join(args.data_dir, "train-*.tfrecords"))
     # number_of_train_files = int(args.train_eval_split*len(all_train_files)/100)
     # train_files = all_train_files[:number_of_train_files]
     # eval_files = all_train_files[number_of_train_files+1:]
-    predict_files = tf.gfile.Glob(os.path.join(args.data_dir, "Inception-V3-features-test.tfrecords"))
+    predict_files = tf.gfile.Glob(os.path.join(args.data_dir, "test-*.tfrecords"))
     # print("Eval files:", eval_files)
 
     total_train_records = 8712
@@ -109,12 +117,12 @@ def main(args):
 
     print("Train records: %d, Eval records: %d" % (eval_split, total_eval_records))
 
-    train_input_fn = model.get_input_fn(filename_queue=all_train_files, batch_size=args.train_batch_size,
-                                        take_count=eval_split, pos_weight=10.0, fake=args.use_fake_data)
-    eval_input_fn = model.get_input_fn(filename_queue=all_train_files, batch_size=args.eval_batch_size,
-                                       skip_count=eval_split, pos_weight=1.0, fake=args.use_fake_data)
-    predict_input_fn = model.get_input_fn(filename_queue=predict_files, batch_size=args.eval_batch_size,
-                                          predict=True, fake=args.use_fake_data)
+    train_input_fn = dataset.get_input_fn(filename_queue=all_train_files, batch_size=args.train_batch_size,
+                                          take_count=eval_split, pos_weight=3.0, fake=args.use_fake_data)
+    eval_input_fn = dataset.get_input_fn(filename_queue=all_train_files, batch_size=args.eval_batch_size,
+                                         skip_count=eval_split, pos_weight=1.0, fake=args.use_fake_data)
+    predict_input_fn = dataset.get_input_fn(filename_queue=predict_files, batch_size=args.eval_batch_size,
+                                            predict=True, fake=args.use_fake_data)
 
     # profiler_hook = tf.train.ProfilerHook(save_steps=args.save_summary_steps,
     #                                      output_dir=os.path.join(args.output_dir, 'profiler'),
@@ -138,8 +146,11 @@ def main(args):
                                       throttle_secs=10)
 
     feature_columns = [
-        tf.feature_column.numeric_column(key='signal', shape=2048),
-        tf.feature_column.numeric_column(key='weight', default_value=1)
+        # tf.feature_column.numeric_column(key='inception_v3', shape=2048, dtype=tf.float32),
+        # tf.feature_column.numeric_column(key='signal', shape=800000, dtype=tf.int8),
+        tf.feature_column.numeric_column(key='input_1', shape=3040, dtype=tf.float32)
+        # tf.feature_column.numeric_column(key='stats', shape=3040, dtype=tf.float32),
+        # tf.feature_column.numeric_column(key='weight', default_value=1, dtype=tf.int64)
     ]
     h_params = {
         'feature_columns': feature_columns,
@@ -154,6 +165,7 @@ def main(args):
         'learning_rate': 0.001
     }
 
+    # session_config = tf.ConfigProto(device_count={'GPU': 0})
     session_config = tf.ConfigProto(gpu_options=tf.GPUOptions(allow_growth=True,
                                                               allocator_type="BFC"),
                                     allow_soft_placement=True,
@@ -175,10 +187,13 @@ def main(args):
                                         train_distribute=distribution)
 
     # estimator = tf.estimator.Estimator(
-    #    model_fn=model.dnn_unbalanced_classifier_model_fn,
+    #    model_fn=model.lstm_with_attention_model_fn,
     #    model_dir=args.output_dir,
     #    config=run_config,
     #    params=h_params)
+
+    k_model = keras_model.model_lstm([eval_split, 160, 19])
+    estimator = keras_model.get_estimator(model=k_model, model_dir=args.output_dir, run_config=run_config)
 
     # tf.estimator.train_and_evaluate(estimator, train_spec, eval_spec)
 
@@ -186,14 +201,14 @@ def main(args):
     #                                           model_dir=args.output_dir,
     #                                           config=run_config)
 
-    estimator = tf.estimator.DNNClassifier(
-        feature_columns=feature_columns,
-        weight_column='weight',
-        hidden_units=[1024, 512],
-        model_dir=args.output_dir,
-        config=run_config,
-        batch_norm=True,
-        dropout=0.3)
+    # estimator = tf.estimator.DNNClassifier(
+    #     feature_columns=feature_columns,
+    #     weight_column='weight',
+    #     hidden_units=[1024, 512],
+    #     model_dir=args.output_dir,
+    #     config=run_config,
+    #     batch_norm=True,
+    #     dropout=0.5)
 
     estimator = tf.contrib.estimator.add_metrics(estimator, custom_metrics)
 
@@ -212,10 +227,12 @@ def main(args):
     # estimator.train(input_fn=train_input_fn, hooks=train_hooks, max_steps=args.train_steps)
     # evaluation_metrics = estimator.evaluate(input_fn=eval_input_fn, steps=args.eval_steps)
 
-    run_prediction(estimator, predict_input_fn, total_train_records, os.path.join(args.output_dir, 'submission.csv'))
-    all_train_input_fn = model.get_input_fn(filename_queue=all_train_files, batch_size=args.train_batch_size,
-                                            fake=args.use_fake_data, predict=True)
-    run_prediction(estimator, all_train_input_fn, 0, os.path.join(args.output_dir, 'train-prediction.csv'))
+    run_prediction(estimator=estimator, predict_input_fn=predict_input_fn, start_id=total_train_records,
+                   output_file_path=os.path.join(args.output_dir, 'submission.csv'))
+    all_train_input_fn = dataset.get_input_fn(filename_queue=all_train_files, batch_size=args.train_batch_size,
+                                              fake=args.use_fake_data, predict=True)
+    run_prediction(estimator=estimator, predict_input_fn=all_train_input_fn, start_id=0,
+                   output_file_path=os.path.join(args.output_dir, 'train-prediction.csv'))
 
 
 if __name__ == '__main__':
@@ -266,12 +283,6 @@ if __name__ == '__main__':
         help='Steps between logging step count.',
         type=int,
         default=10
-    )
-    parser.add_argument(
-        '--eval_steps',
-        help='Number of steps to run evaluation for at each checkpoint',
-        default=10,
-        type=int
     )
     parser.add_argument(
         '--output_dir',

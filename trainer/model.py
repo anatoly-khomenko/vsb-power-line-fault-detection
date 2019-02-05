@@ -5,65 +5,67 @@ from __future__ import print_function
 import tensorflow as tf
 
 
-def input_fn(filename_queue, batch_size=1, take_count=None, skip_count=None, pos_weight=20.0, predict=False,
-             fake=False):
-    signal_feature_description = {
-        'spectrum': tf.FixedLenFeature([], tf.string),
-        'target': tf.FixedLenFeature([], tf.int64, 0),
-    }
+def lstm_with_attention_model_fn(features, labels, mode, params):
+    input_layer = features['stats']
+    # reshape to [batches, time series, channels]
+    input_layer = tf.reshape(input_layer, shape=[-1, 3040, 1])
+    # transpose to time-major form [time series, batches, channels]
+    input_layer = tf.transpose(input_layer, [1, 0, 2])
+    lstm1, _ = tf.contrib.cudnn_rnn.CudnnLSTM(num_layers=1, num_units=128, direction='unidirectional')(input_layer)
+    # attention_mechanism = tf.contrib.seq2seq.LuongMonotonicAttention(num_units=input_layer.shape[2],
+    #                                                                  memory=lstm1)
+    # lstm2 = tf.contrib.seq2seq.AttentionWrapper(
+    #     cell=tf.contrib.cudnn_rnn.CudnnLSTM(num_layers=1, num_units=64, direction='unidirectional'),
+    #     attention_mechanism=attention_mechanism
+    # )(lstm1)
+    lstm2, _ = tf.contrib.cudnn_rnn.CudnnLSTM(num_layers=1, num_units=64, direction='unidirectional')(lstm1)
 
-    def _parse_signal(example_proto):
-        # Parse the input tf.Example proto using the dictionary above.
-        parsed = tf.parse_single_example(example_proto, signal_feature_description)
-        # signal = tf.reshape(signal, [32, 3571])
-        # signal = (tf.cast(signal, tf.float32) + 128.0)/255.0
-        # target = tf.one_hot(indices=parsed['target'], depth=2)
-        target = parsed['target']
-        # create fake data which are easy to learn
-        # with the same amount of positive and negative samples as in real data
-        if fake:
-            if predict:  # when predicting set target to generate different signals in the condition below
-                target = tf.squeeze(
-                    tf.random.poisson(lam=0.1, shape=(1,), dtype=tf.int64, seed=12345)
-                )
-            weight, signal = tf.cond(tf.math.equal(target, 1),
-                                     lambda: (pos_weight,
-                                              tf.concat([tf.ones(shape=1024, dtype=tf.float32),
-                                                        tf.zeros(shape=1024, dtype=tf.float32)], 0)),
-                                     lambda: (1.0,
-                                              tf.concat([tf.zeros(shape=1024, dtype=tf.float32),
-                                                         tf.ones(shape=1024, dtype=tf.float32)], 0))
-                                     )
-        else:
-            signal = tf.decode_raw(parsed['spectrum'], tf.float32)
-            signal.set_shape(2048)
-            if predict:
-                weight = 1.0
-            else:
-                weight = tf.cond(tf.math.equal(target, 1), lambda: pos_weight, lambda: 1.0)
+    lstm2 = tf.reduce_sum(lstm2, axis=2)
 
-        return {'signal': signal, 'weight': weight}, target
+    # transpose to channels major form
+    lstm2 = tf.transpose(lstm2, [1, 0])
 
-    dataset = tf.data.TFRecordDataset(filenames=filename_queue, num_parallel_reads=8)
+    # mask = tf.tile(
+    #     tf.expand_dims(tf.sequence_mask(3040, tf.shape(lstm2)[1]), 2),
+    #     [1, 1, tf.shape(lstm2)[2]])
+    # zero_outside = tf.where(mask, lstm2, tf.zeros_like(lstm2))
+    # lstm2 = tf.reduce_sum(zero_outside, axis=1)
 
-    if skip_count is not None:
-        dataset = dataset.skip(skip_count)  # take data at the end of dataset, evaluation set
-    elif take_count is not None:
-        dataset = dataset.take(take_count)  # take data at the beginning of the dataset, training set
+    dense = tf.layers.dense(inputs=lstm2, units=64, activation=tf.nn.leaky_relu)
+    logits = tf.layers.dense(inputs=dense, units=params['num_classes'], activation=tf.nn.softmax)
 
-    if not predict:
-        dataset = dataset.apply(tf.contrib.data.shuffle_and_repeat(buffer_size=1000))
+    predicted_indices = tf.argmax(input=logits, axis=1)
+    probabilities = tf.nn.softmax(logits, name='softmax_tensor')
 
-    dataset = dataset.apply(tf.contrib.data.map_and_batch(map_func=_parse_signal, batch_size=batch_size))
-    dataset = dataset.prefetch(buffer_size=None)
-    return dataset
+    if mode == tf.estimator.ModeKeys.PREDICT:
+        predictions = {
+            'class_ids': predicted_indices,
+            'probabilities': probabilities
+        }
+        export_outputs = {
+            'prediction': tf.estimator.export.PredictOutput(predictions)
+        }
+        return tf.estimator.EstimatorSpec(mode, predictions=predictions, export_outputs=export_outputs)
 
+    one_hot_labels = tf.one_hot(labels, 2)
+    loss = tf.losses.softmax_cross_entropy(onehot_labels=one_hot_labels, logits=logits)
+    tf.summary.scalar('OptimizeLoss', loss)
 
-def get_input_fn(filename_queue, batch_size=1, take_count=None, skip_count=None, pos_weight=20.0, predict=False,
-                 fake=False):
-    return lambda: input_fn(filename_queue=filename_queue, batch_size=batch_size,
-                            take_count=take_count, skip_count=skip_count, pos_weight=pos_weight, predict=predict,
-                            fake=fake)
+    if mode == tf.estimator.ModeKeys.EVAL:
+        eval_metric_ops = {'accuracy': tf.metrics.accuracy(labels, predicted_indices),
+                           'mean_per_class_accuracy': tf.metrics.mean_per_class_accuracy(labels,
+                                                                                         predicted_indices,
+                                                                                         params['num_classes']),
+                           'precision': tf.metrics.precision(labels, probabilities),
+                           'recall': tf.metrics.recall(labels, probabilities)
+                           }
+        return tf.estimator.EstimatorSpec(mode, loss=loss, eval_metric_ops=eval_metric_ops)
+
+    if mode == tf.estimator.ModeKeys.TRAIN:
+        global_step = tf.train.get_or_create_global_step()
+        optimizer = tf.train.AdagradOptimizer(learning_rate=params['learning_rate'])
+        train_op = optimizer.minimize(loss, global_step=global_step)
+        return tf.estimator.EstimatorSpec(mode, loss=loss, train_op=train_op)
 
 
 def linear_classifier_model_fn(features, labels, mode, params):

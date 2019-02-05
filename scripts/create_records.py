@@ -14,9 +14,11 @@ import time
 import pandas as pd
 # noinspection PyPackageRequirements
 from pyarrow import parquet as pq
-import tensorflow as tf
 import numpy as np
-from scipy import signal
+import tensorflow as tf
+from tqdm import tqdm
+
+from trainer import dataset
 
 
 def current_milli_time():
@@ -33,69 +35,113 @@ def read_parquet(name, cols=None):
     return table
 
 
-def _int64_feature(value):
-    return tf.train.Feature(int64_list=tf.train.Int64List(value=[value]))
+def min_max_transf(ts, min_data, max_data, range_needed=(-1, 1)):
+    if min_data < 0:
+        ts_std = (ts + abs(min_data)) / (max_data + abs(min_data))
+    else:
+        ts_std = (ts - min_data) / (max_data - min_data)
+    if range_needed[0] < 0:
+        return ts_std * (range_needed[1] + abs(range_needed[0])) + range_needed[0]
+    else:
+        return ts_std * (range_needed[1] - range_needed[0]) + range_needed[0]
 
 
-def _bytes_feature(value):
-    return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
+def calc_stats(ts, n_dim=160, min_max=(-1, 1)):
+    max_num = 127
+    min_num = -128
+    sample_size = 800000
+    # convert data into -1 to 1
+    ts_std = min_max_transf(ts, min_data=min_num, max_data=max_num)
+    # bucket or chunk size, 5000 in this case (800000 / 160)
+    bucket_size = int(sample_size / n_dim)
+    # new_ts will be the container of the new data
+    new_ts = []
+    # this for interact any chunk/bucket until reach the whole sample_size (800000)
+    for i in range(0, sample_size, bucket_size):
+        # cut each bucket to ts_range
+        ts_range = ts_std[i:i + bucket_size]
+        # calculate each feature
+        mean = ts_range.mean()
+        std = ts_range.std()  # standard deviation
+        std_top = mean + std  # I have to test it more, but is is like a band
+        std_bot = mean - std
+        # I think that the percentiles are very important, it is like a distribution analysis from each chunk
+        percentil_calc = np.percentile(ts_range, [0, 1, 25, 50, 75, 99, 100])
+        max_range = percentil_calc[-1] - percentil_calc[0]  # this is the amplitude of the chunk
+        relative_percentile = percentil_calc - mean  # maybe it could heap to understand the asymmetry
+        # now, we just add all the features to new_ts and convert it to np.array
+        new_ts.append(np.concatenate(
+            [np.asarray([mean, std, std_top, std_bot, max_range]), percentil_calc, relative_percentile]))
+    return np.asarray(new_ts)
 
 
-def filter_signal_low_freq(source, upper_freq, signal_duration=2.0E-2) -> (np.ndarray, np.ndarray):
-    freqs = np.fft.rfft(source)
-    upper_index = int(upper_freq * signal_duration)
-    f_freqs = np.concatenate((np.zeros((upper_index,)),freqs[upper_index:]))
-    result = np.fft.irfft(f_freqs)
-    return result
+def _create_examples(id_measurement, metadata, signals_parq):
+    examples = []
+    for phase in [0, 1, 2]:
+        try:
+            record = metadata.loc[(id_measurement, phase)]
+            signal_id = record.loc['signal_id']
+            if 'target' in record:
+                target = record.loc['target']
+            else:
+                target = None
+            # extract signal from PyArrow Column to pandas Series using zero copy. No data transformation.
+            signal_pandas = signals_parq.column(str(signal_id)).to_pandas(zero_copy_only=True)
+            # get underlying NumPy array from pandas Series and it's bytes representation.
+            # No data transformation happens here.
+            signal_bytes = signal_pandas.values.tobytes()
+            # Add statistics data
+            stats = calc_stats(signal_pandas)
+            # construct Example to store in TFRecord
+            features_dict = {
+                'signal_id': dataset.int64_feature(signal_id),
+                'id_measurement': dataset.int64_feature(id_measurement),
+                'phase': dataset.int64_feature(phase),
+                'signal': dataset.bytes_feature(signal_bytes),
+                'stats':  dataset.bytes_feature(stats.tobytes())
+            }
+            # no target given in test metadata, in this case no target feature will be present
+            if target is not None:
+                features_dict['target'] = dataset.int64_feature(target)
+            examples.append(tf.train.Example(features=tf.train.Features(feature=features_dict)))
+        except KeyError as e:
+            # id_measurement or phase is not present
+            print("Warning: ", e)
+            pass
+    return examples
 
 
-def convert_to_tf(signals_parquet, metadata_csv, target_tf_prefix, batch_size):
+def convert_to_tf(signals_file_name, metadata_file_name, target_tf_prefix, batch_size):
     # read entire metadata into memory
-    metadata = pd.read_csv(metadata_csv)
+    metadata = pd.read_csv(metadata_file_name)
+    metadata.set_index(keys=['id_measurement', 'phase'],
+                       drop=False, inplace=True, verify_integrity=True)
+    metadata.sort_index(level='id_measurement', inplace=True)
+    metadata_id_measurements = metadata.index.get_level_values('id_measurement').unique()
+    n_measurements = len(metadata_id_measurements)
+    num_batches = n_measurements // batch_size + 1
     # iterate over metadata in batches
-    for batch_num in range(len(metadata) // batch_size + 1):
+    for batch_num in range(num_batches):
+        print("Batch#", batch_num, ' of ', num_batches)
         batch_start = batch_num * batch_size
         batch_end = batch_start + batch_size
-        if batch_end > len(metadata):
-            batch_end = len(metadata)
-        # generate column names that are included in the current batch
-        cols = [str(metadata['signal_id'][i]) for i in range(batch_start, batch_end)]
+        if batch_end > n_measurements:
+            batch_end = n_measurements
+        metadata_id_measurements_batch = metadata_id_measurements[batch_start:batch_end]
+        metadata_batch = metadata.loc[metadata_id_measurements_batch]
+        # get column names that are included in the current batch
+        cols = map(str, list(metadata_batch['signal_id']))
         # read batch of columns from parquet file
-        signals = read_parquet(signals_parquet, cols)
+        signals_parq = read_parquet(signals_file_name, cols)
         # generate file name to write and open this file with TensorFlow
-        tf_records_file_name = target_tf_prefix + "-" + str(batch_num) + '.tfrecords'
+        tf_records_file_name = target_tf_prefix + "-" + ("%05d" % batch_num) + '.tfrecords'
         print("Writing to :", tf_records_file_name)
         with tf.python_io.TFRecordWriter(tf_records_file_name) as writer:
             # iterate over metadata rows in current batch
-            for index, metadata_row in metadata[batch_start:batch_end].iterrows():
-                # extract signal from PyArrow Column to pandas Series using zero copy. No data transformation.
-                signal_pandas = signals.column(index - batch_start).to_pandas(zero_copy_only=True)
-                # get underlying NumPy array from pandas Series and it's bytes representation.
-                # No data transformation happens here.
-                # signal_bytes = signal_pandas.values.tobytes()
-
-                sampling_frequency = 800000 * 100 / 2  # number of samples divided by signal duration 800000 / 20ms
-                lower_frequency = 1.5E7  # cut off lower 15Mhz.
-                _, _, spectrum = signal.spectrogram(signal_pandas.values, sampling_frequency)
-                start_index = int(lower_frequency * spectrum.shape[0] * 2 / sampling_frequency) + 1  # x2 as one-sided
-                height = spectrum.shape[0] - start_index
-                width = spectrum.shape[1]
-                spectrum = spectrum[start_index:][:]
-                spectrum = spectrum.astype(np.float32)
-                spectrum_bytes = spectrum.tobytes()
-                # construct Example to store in TFRecord
-                tf_example = tf.train.Example(features=tf.train.Features(feature={
-                    'signal_id': _int64_feature(metadata_row[0]),
-                    'id_measurement': _int64_feature(metadata_row[1]),
-                    'phase': _int64_feature(metadata_row[2]),
-                    # if no target given in metadata, initialize target with -1
-                    'target': _int64_feature(metadata_row[3] if len(metadata_row) > 3 else -1),
-                    'height': _int64_feature(height),
-                    'width': _int64_feature(width),
-                    'spectrum': _bytes_feature(spectrum_bytes)}))
-                writer.write(tf_example.SerializeToString())
-                if index % 100 == 0:
-                    print('Converted ', index)
+            for id_measurement in tqdm(metadata_id_measurements_batch):
+                examples = _create_examples(id_measurement, metadata_batch, signals_parq)
+                for example in examples:
+                    writer.write(example.SerializeToString())
 
 
 FLAGS = []
@@ -112,13 +158,13 @@ def main(unused_argv):
             FLAGS.destination_directory = FLAGS.source_directory
     # Convert to Examples and write the result to TFRecords.
     print('Converting train data:')
-    convert_to_tf(signals_parquet=os.path.join(FLAGS.source_directory, 'train.parquet'),
-                  metadata_csv=os.path.join(FLAGS.source_directory, 'metadata_train.csv'),
+    convert_to_tf(signals_file_name=os.path.join(FLAGS.source_directory, 'train.parquet'),
+                  metadata_file_name=os.path.join(FLAGS.source_directory, 'metadata_train.csv'),
                   target_tf_prefix=os.path.join(FLAGS.destination_directory, 'train'),
                   batch_size=FLAGS.batch_size)
     print("Converting test data:")
-    convert_to_tf(signals_parquet=os.path.join(FLAGS.source_directory, 'test.parquet'),
-                  metadata_csv=os.path.join(FLAGS.source_directory, 'metadata_test.csv'),
+    convert_to_tf(signals_file_name=os.path.join(FLAGS.source_directory, 'test.parquet'),
+                  metadata_file_name=os.path.join(FLAGS.source_directory, 'metadata_test.csv'),
                   target_tf_prefix=os.path.join(FLAGS.destination_directory, 'test'),
                   batch_size=FLAGS.batch_size)
 
@@ -140,7 +186,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--batch-size',
         type=int,
-        default=2000,
+        default=200,
         help='Number of columns of parquet file to read in memory at once.'
     )
     FLAGS, unparsed = parser.parse_known_args()

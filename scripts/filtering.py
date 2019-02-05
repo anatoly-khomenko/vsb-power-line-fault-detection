@@ -1,5 +1,3 @@
-import winsound
-
 import pandas as pd
 import pyarrow.parquet as pq
 import numpy as np
@@ -220,6 +218,96 @@ def scipy_spectrogram(x):
     plt.xlabel('Time [sec]')
     plt.show()
 
+
+def tw_transformation_features(s, sdt=2E-2, wdt=2E-6, overlap=0.25):
+    """
+    :param s: signal
+    :param sdt: signal duration time
+    :param wdt: window width in seconds 2000ns (2micro sec) time-frame
+    :param overlap: windows overlap (0.25 is 25%)
+    http://www.innoconsulting.com.ar/innorep/html/pdf/Bangalore_08.pdf
+    """
+    n = len(s)
+    # time between measurements
+    dt = sdt / n
+    win = int(wdt/dt)
+    # overlap 25%
+    step = int(win * (1 - overlap))
+    ts = np.zeros(int((n-win)/step), np.float32)
+    ws = np.zeros(int((n-win)/step), np.float32)
+    i = 0
+    for start in range(0, n - win, step):
+        sw = s[start:start + win].astype(np.float32)
+        tau = np.arange(start, start + win, 1, dtype=np.float32)
+        tau = tau * dt
+        ns = sw / np.sqrt(np.trapz(np.abs(np.square(sw)), tau))
+        # L2 normalized signal
+        # ns = sw / np.linalg.norm(x=sw, ord=2)
+        t0 = np.trapz(tau * ns, tau)
+        # t0 = np.sum(tau * np.abs(ns))/win
+        t = np.sqrt(np.trapz(np.square(tau - t0)*np.square(sw), tau))
+        # t = np.sum(np.square(tau - t0)*np.square(ns)/win)
+        sf = np.fft.fft(ns)
+        f = np.fft.fftfreq(win, dt)
+        mid = int(len(f)/2)
+        f = np.concatenate([f[mid:], f[:mid]])
+        sf = np.concatenate([sf[mid:], sf[:mid]])
+        w = np.sqrt(np.trapz(np.square(f)*np.square(sw)*np.abs(np.square(sf)), f))
+        ts[i] = t
+        ws[i] = w
+        i += 1
+    return ts, ws
+
+
+def tw_transformation_features_stat(s, sdt=2E-2, wdt=2E-6, overlap=0.25):
+    """
+    :param s: signal
+    :param sdt: signal duration time
+    :param wdt: window width in seconds (by default 2000ns (2micro sec) time-frame)
+    :param overlap: windows overlap (0.25 is 25%)
+    http://www.innoconsulting.com.ar/innorep/html/pdf/Bangalore_08.pdf
+    """
+    n = len(s)
+    # time between measurements
+    dt = sdt / n
+    win = int(wdt/dt)
+    # overlap 25%
+    step = int(win * (1 - overlap))
+    ts = np.zeros(int((n-win)/step), np.float32)
+    ws = np.zeros(int((n-win)/step), np.float32)
+    i = 0
+    for start in range(0, n - win, step):
+        sw = s[start:start + win].astype(np.float32)
+        tau = np.arange(start, start + win, 1, dtype=np.float32)
+        tau = tau * dt
+        # ns = sw / np.sqrt(np.trapz(np.abs(np.square(sw)), tau))
+        # L2 normalized signal
+        ns = sw / np.linalg.norm(x=sw, ord=2)
+        # t0 = np.trapz(tau * ns, tau)
+        # t0 = np.sum(tau * ns)/np.sum(ns)
+        # t0 = np.sum(tau * np.abs(ns))/win
+        # t = np.sqrt(np.trapz(np.square(tau - t0)*np.square(sw), tau))
+        sm = np.mean(ns)
+        t = np.sqrt(np.sum(np.square(ns - sm))/win)
+        sf = np.fft.rfft(ns)
+        # f = np.fft.fftfreq(win, dt)
+        # mid = int(len(f)/2)
+        # f = np.concatenate([f[mid:], f[:mid]])
+        # sf = np.concatenate([sf[mid:], sf[:mid]])
+        sfm = np.mean(sf)
+        w = np.sqrt(np.sum(np.square(sf - sfm))/win)
+        # w = np.sqrt(np.trapz(np.square(f)*np.square(sw)*np.abs(np.square(sf)), f))
+        ts[i] = t
+        ws[i] = np.abs(w)
+        i += 1
+    return ts, ws
+
+
+def plot_dots(x, y):
+    plt.scatter(x=x, y=y, s=1)
+    plt.show()
+
+
 def main():
     # wavelet(0)
     # filtering()
@@ -227,7 +315,7 @@ def main():
     # spectrogram(3)
 
     start_col = 2
-    n_cols = 2
+    n_cols = 10
     cols = [str(i) for i in range(start_col, start_col + n_cols)]
     train = pq.read_pandas('../../input/train.parquet', columns=cols).to_pandas()
 
@@ -237,15 +325,19 @@ def main():
     for c in cols:
         #  filtered_signal = filter_signal_low_freq(train[c], 1.5E7)
         filtered_signal = train[c]
+        # x = np.arange(0, 2E-2, 2E-2/800000)
+        # filtered_signal = np.sin(x)
         # scipy_spectrogram(filtered_signal)
         # fs = 8000
         # sd.play(filtered_signal, fs)
         # sd.wait()
-        plots.append(filtered_signal)
+        # plots.append(filtered_signal)
+        ts, ws = tw_transformation_features(filtered_signal, 2E-2, 1E-5, 0.25)
+        plot_dots(ws, ts)
 
 
     # plots = [train[c], filtered_signal]
-    plot_all(plots)
+    # plot_all(plots)
 
 
     # spectrogram_it(train[str(col)])
