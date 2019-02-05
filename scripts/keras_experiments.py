@@ -10,6 +10,7 @@ from keras import backend as K # The backend give us access to tensorflow operat
 from keras import optimizers # Allow us to access the Adam class to modify some parameters
 from sklearn.model_selection import GridSearchCV, StratifiedKFold # Used to use Kfold to train our model
 from keras.callbacks import * # This object helps the model to train in a smarter way, avoiding overfitting
+import tensorflow as tf
 
 # select how many folds will be created
 N_SPLITS = 5
@@ -301,14 +302,18 @@ print(preds_val.shape, y_val.shape)
 # So, find the best threshold to convert float to binary is crucial to the result
 # this piece of code is a function that evaluates all the possible thresholds from 0 to 1 by 0.01
 def threshold_search(y_true, y_proba):
-    best_threshold = 0
-    best_score = 0
-    for threshold in tqdm([i * 0.01 for i in range(100)]):
-        y_proba_bin = y_proba[y_proba > threshold]
-        score = K.eval(matthews_correlation(y_true.astype(np.float64), y_proba_bin.astype(np.float64)))
-        if score > best_score:
-            best_threshold = threshold
-            best_score = score
+    with tf.Session() as sess:
+        best_threshold = 0
+        best_score = 0
+        for threshold in tqdm([i * 0.01 for i in range(100)]):
+            y_proba_bin = y_proba[y_proba > threshold]
+            y_p_t = tf.convert_to_tensor(y_proba_bin, np.float64)
+            y_t_t = tf.convert_to_tensor(y_proba_bin, np.float64)
+            # score = K.eval(matthews_correlation(y_true.astype(np.float64), y_proba_bin.astype(np.float64)))
+            score = K.eval(matthews_correlation(y_t_t, y_p_t))
+            if score > best_score:
+                best_threshold = threshold
+                best_score = score
     search_result = {'threshold': best_threshold, 'matthews_correlation': best_score}
     return search_result
 
