@@ -307,8 +307,8 @@ def threshold_search(y_true, y_proba):
         best_score = 0
         for threshold in tqdm([i * 0.01 for i in range(100)]):
             y_proba_bin = y_proba[y_proba > threshold]
-            y_p_t = tf.convert_to_tensor(y_proba_bin, np.float64)
-            y_t_t = tf.convert_to_tensor(y_true, np.float64)
+            y_p_t = tf.convert_to_tensor(y_proba_bin.astype(np.float64), tf.float64)
+            y_t_t = tf.convert_to_tensor(y_true.astype(np.float64), tf.float64)
             # score = K.eval(matthews_correlation(y_true.astype(np.float64), y_proba_bin.astype(np.float64)))
             score = K.eval(matthews_correlation(y_t_t, y_p_t))
             if score > best_score:
