@@ -1,11 +1,14 @@
-import tensorflow as tf
+from tensorflow.python import keras
+from tensorflow.python.keras.models import *
+from tensorflow.python.keras.layers import *
+from tensorflow.python.keras import backend as K
 
 
 # https://www.kaggle.com/suicaokhoailang/lstm-attention-baseline-0-652-lb
-class Attention(tf.keras.layers.Layer):
+class Attention(Layer):
     def __init__(self, output_dim, **kwargs):
         self.supports_masking = True
-        self.init = tf.keras.initializers.get('glorot_uniform')
+        self.init = keras.initializers.get('glorot_uniform')
 
         self.w_regularizer = None
         self.b_regularizer = None
@@ -112,7 +115,7 @@ def model_lstm(input_shape):
     # Bidirecional implies that the 160 chunks are calculated in both ways, 0 to 159 and 159 to zero
     # although it appear that just 0 to 159 way matter, I have tested with and without, and tha later worked best
     # 128 and 64 are the number of cells used, too many can overfit and too few can underfit
-    x = tf.keras.layers.Bidirectional(tf.keras.layers.CuDNNLSTM(128, return_sequences=True))(inp)
+    x = tf.keras.layers.Bidirectional(tf.keras.layers.CuDNNLSTM(128, return_sequences=True), input_shape=(160, 2))(inp)
     # The second LSTM can give more fire power to the model, but can overfit it too
     x = tf.keras.layers.Bidirectional(tf.keras.layers.CuDNNLSTM(64, return_sequences=True))(x)
     # Attention is a new technology that can be applied to a Recurrent NN
