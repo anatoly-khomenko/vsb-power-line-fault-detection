@@ -1,8 +1,10 @@
 <component name="ProjectDictionaryState">
   <dictionary name="anatoly">
     <words>
+      <w>argmax</w>
       <w>conv</w>
       <w>crossentropy</w>
+      <w>cudnn</w>
       <w>dataflow</w>
       <w>dataset</w>
       <w>dtype</w>
@@ -11,12 +13,14 @@
       <w>keras</w>
       <w>logits</w>
       <w>lstm</w>
+      <w>luong</w>
       <w>nccl</w>
       <w>numpys</w>
       <w>paddings</w>
       <w>parq</w>
       <w>percentil</w>
       <w>pred</w>
+      <w>preprocess</w>
       <w>preprocessing</w>
       <w>pyarrow</w>
       <w>regularizer</w>

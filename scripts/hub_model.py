@@ -17,8 +17,7 @@ def process_files(suffix, input_dir, log_dir, output_dir, features_tensor, input
     os.makedirs(output_dir, exist_ok=True)
     train_files = glob.glob(os.path.join(input_dir, suffix + '-*.tfrecords'))
     # train_files = [os.path.join(input_dir, suffix + '-0.tfrecords')]
-    train_input_fn = dataset.get_input_fn(filename_queue=train_files, batch_size=batch_size, predict=True)
-    train_dataset = train_input_fn()
+    train_dataset = dataset.load(train_files).batch(batch_size).prefetch(buffer_size=None)
     train_dataset = train_dataset.map(map_func=dataset.dct_map_func, num_parallel_calls=8)
     tf_records_file_name = os.path.join(output_dir, suffix + '-0.tfrecords')
     with tf.Session() as sess, tf.python_io.TFRecordWriter(tf_records_file_name) as writer:

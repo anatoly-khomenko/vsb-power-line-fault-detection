@@ -1,5 +1,7 @@
 import tensorflow as tf
 import tensorflow_probability as tfp
+import multiprocessing
+import os
 
 
 def int64_feature(value):
@@ -39,10 +41,6 @@ def dct_map_func(features, labels):
     return features, labels
 
 
-def class_map_func(features, labels):
-    return labels
-
-
 def stats_map_func(features, labels):
     ts = features['signal']
     sample_size = tf.shape(ts)[-1]
@@ -57,6 +55,7 @@ def stats_map_func(features, labels):
     all_stats = tf.TensorArray(size=n_dim, dtype=tf.float32,
                                element_shape=tf.TensorShape([19, None]))
 
+    # noinspection PyUnusedLocal
     def _cond(j_v, i_v, all_stats_v):
         return tf.less(i_v, sample_size)
 
@@ -91,6 +90,34 @@ def stats_map_func(features, labels):
 
     features['stats_1'] = all_stats_tensor
     return features, labels
+
+
+def generate_stats(stats_folder, source_dataset, prefix):
+    target_tf_prefix = os.path.join(stats_folder, prefix)
+    batch_num = 0
+    with tf.Session() as sess:
+        next_test = source_dataset.make_one_shot_iterator().get_next()
+        while True:
+            try:
+                features, labels = sess.run(next_test)
+                tf.logging.log(tf.logging.INFO, features['signal_id'])
+                tf_records_file_name = target_tf_prefix + "-" + ("%05d" % batch_num) + '.tfrecords'
+                batch_num += 1
+                tf.logging.log(tf.logging.INFO, "Writing to :" + tf_records_file_name)
+                with tf.python_io.TFRecordWriter(tf_records_file_name) as writer:
+                    for i in range(len(labels)):
+                        example_features = {
+                            'signal_id': int64_feature(features['signal_id'][i]),
+                            'id_measurement': int64_feature(features['id_measurement'][i]),
+                            'phase': int64_feature(features['phase'][i]),
+                            'stats_1': bytes_feature(features['stats_1'][i].tobytes()),
+                        }
+                        if 'target' in features:
+                            example_features['target'] = int64_feature(features['target'][i])
+                        example = tf.train.Example(features=tf.train.Features(feature=example_features))
+                        writer.write(example.SerializeToString())
+            except tf.errors.OutOfRangeError:  # end of dataset
+                break
 
 
 def roll_map_func(features, labels):
@@ -131,62 +158,7 @@ def _generate_fake(predict, pos_weight, target):
     return signal, weight, target
 
 
-def _input_fn(filename_queue, batch_size=1, take_count=None, skip_count=None, pos_weight=20.0, predict=False,
-              fake=False):
-    signal_feature_description = {
-        'signal_id': tf.FixedLenFeature([], tf.int64),
-        'id_measurement': tf.FixedLenFeature([], tf.int64),
-        'phase': tf.FixedLenFeature([], tf.int64),
-        'signal': tf.FixedLenFeature([], tf.string, ''),
-        'spectrum': tf.FixedLenFeature([], tf.string, ''),
-        'inception_v3': tf.FixedLenFeature([], tf.string, ''),
-        'stats': tf.FixedLenFeature([], tf.string, ''),
-        # if no target given in metadata, initialize target with -1
-        'target': tf.FixedLenFeature([], tf.int64, -1)
-    }
-
-    def _parse_signal(example_proto):
-        # Parse the input tf.Example proto using the dictionary above.
-        parsed = tf.parse_single_example(example_proto, signal_feature_description)
-        target = parsed.pop('target')
-        if fake:
-            signal, weight, target = _generate_fake(predict=predict, pos_weight=pos_weight, target=target)
-        else:
-            # read real signal which is 800K bytes
-            signal = tf.decode_raw(parsed['signal'], tf.int8)
-            parsed['spectrum'] = tf.decode_raw(parsed['spectrum'], tf.float32)
-            parsed['inception_v3'] = tf.decode_raw(parsed['inception_v3'], tf.float32)
-            parsed['stats'] = tf.decode_raw(parsed['stats'], tf.float64)
-            if not predict:
-                weight = tf.cond(tf.math.equal(target, 1), lambda: pos_weight, lambda: 1.0)
-                parsed['weight'] = weight
-        parsed['signal'] = signal
-        return parsed, target
-
-    dataset = tf.data.TFRecordDataset(filenames=filename_queue, num_parallel_reads=8)
-
-    if skip_count is not None:
-        dataset = dataset.skip(skip_count)  # take data at the end of dataset, evaluation set
-    elif take_count is not None:
-        dataset = dataset.take(take_count)  # take data at the beginning of the dataset, training set
-
-    if not predict:
-        dataset = dataset.apply(tf.contrib.data.shuffle_and_repeat(buffer_size=1000))
-
-    dataset = dataset.apply(tf.contrib.data.map_and_batch(map_func=_parse_signal, batch_size=batch_size))
-    # dataset = dataset.apply(tf.data.experimental.rejection_resample(class_func=class_map_func,
-    #                                                                 target_dist=[0.5, 0.5],
-    #                                                                 initial_dist=[1-525/8712, 525/8712]))
-
-    dataset = dataset.prefetch(buffer_size=None)
-    # dataset = dataset.map(map_func=stats_map_func, num_parallel_calls=8)
-    # dataset = dataset.map(map_func=roll_map_func, num_parallel_calls=8)
-    # dataset = dataset.map(map_func=dct_map_func, num_parallel_calls=8)
-    # dataset = dataset.map(map_func=scale_map_func, num_parallel_calls=8)
-    return dataset
-
-
-def original(filename_queue):
+def load(filename_queue):
     signal_feature_description = {
         'signal_id': tf.FixedLenFeature([], tf.int64),
         'id_measurement': tf.FixedLenFeature([], tf.int64),
@@ -207,11 +179,13 @@ def original(filename_queue):
             parsed[key] = tf.decode_raw(parsed[key], signal_feature_encoded_types[key])
         return parsed, parsed['target']
 
-    dataset = tf.data.TFRecordDataset(filenames=filename_queue, num_parallel_reads=8)
-    dataset = dataset.map(map_func=_parse_signal, num_parallel_calls=8)
+    cpu_count = multiprocessing.cpu_count()
+    dataset = tf.data.TFRecordDataset(filenames=filename_queue, num_parallel_reads=cpu_count)
+    dataset = dataset.map(map_func=_parse_signal, num_parallel_calls=cpu_count)
     return dataset
 
 
+# noinspection PyUnusedLocal
 def positives(features, label):
     """
     This function only works with batches consisting of single examples
@@ -220,17 +194,3 @@ def positives(features, label):
     :return: True if the example is positive
     """
     return tf.reshape(tf.equal(label, 1), [])
-
-
-def get_input_fn(filename_queue, batch_size=1, take_count=None, skip_count=None, pos_weight=20.0, predict=False,
-                 fake=False):
-    return lambda: _input_fn(filename_queue=filename_queue, batch_size=batch_size,
-                             take_count=take_count, skip_count=skip_count, pos_weight=pos_weight, predict=predict,
-                             fake=fake)
-
-
-def serving_input_fn():
-    features = {
-      'stats_1': tf.placeholder(dtype=tf.float32, shape=3040)
-    }
-    return tf.estimator.export.build_raw_serving_input_receiver_fn(features)

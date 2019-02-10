@@ -1,7 +1,7 @@
 from setuptools import find_packages
 from setuptools import setup
 
-REQUIRED_PACKAGES = []
+REQUIRED_PACKAGES = ['tqdm']
 
 setup(
     name='vsb_power_line_fault_detection',

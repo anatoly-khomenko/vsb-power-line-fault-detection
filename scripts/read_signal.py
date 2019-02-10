@@ -166,7 +166,7 @@ def main(unused_argv):
     #                                       predict=FLAGS.predict,
     #                                       fake=FLAGS.fake)
     # train_dataset = train_input_fn()
-    train_dataset = dataset.original(filename_queue=train_files)
+    train_dataset = dataset.load(filename_queue=train_files)
     # transform dataset records
     # train_dataset = train_dataset.map(map_func=dataset.stats_map_func, num_parallel_calls=8)
     end = current_milli_time()
@@ -185,7 +185,7 @@ def main(unused_argv):
     #                                      fake=FLAGS.fake)
     # test_dataset = test_input_fn()
     # test_dataset = test_dataset.map(map_func=dataset.stats_map_func, num_parallel_calls=8)
-    test_dataset = dataset.original(filename_queue=test_files)
+    test_dataset = dataset.load(filename_queue=test_files)
     end = current_milli_time()
 
     print('Created test dataset in ', end - start, 'ms.')

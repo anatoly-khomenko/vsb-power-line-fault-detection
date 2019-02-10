@@ -212,7 +212,7 @@ def dnn_unbalanced_classifier_model_fn(features, labels, mode, params):
                              units=params['num_classes'], activation=tf.nn.softmax)
 
     predicted_indices = tf.argmax(input=logits, axis=1)
-    target_indices = tf.argmax(input=labels, axis=1)
+    # target_indices = tf.argmax(input=labels, axis=1)
     probabilities = tf.nn.softmax(logits, name='softmax_tensor')
 
     if mode == tf.estimator.ModeKeys.PREDICT:
@@ -299,4 +299,3 @@ def cnn_model_fn(features, labels, mode, params):
         optimizer = tf.train.AdagradOptimizer(learning_rate=params['learning_rate'])
         train_op = optimizer.minimize(loss, global_step=global_step)
         return tf.estimator.EstimatorSpec(mode, loss=loss, train_op=train_op)
-
