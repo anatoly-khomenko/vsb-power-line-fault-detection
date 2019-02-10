@@ -3,84 +3,10 @@ import os
 
 import tensorflow as tf
 from tqdm import tqdm
-from trainer import keras_model
+from trainer import create_tf_records
 
 from trainer import model
 from trainer import dataset
-
-
-class MetadataProfilerHook(tf.train.SessionRunHook):
-    def __init__(self,
-                 save_steps=None,
-                 save_secs=None,
-                 output_dir=""):
-        self._file_writer = None
-        self._next_step = None
-        self._global_step_tensor = None
-        self._request_summary = None
-        self._output_dir = output_dir
-        self._timer = tf.train.SecondOrStepTimer(every_secs=save_secs, every_steps=save_steps)
-
-    def begin(self):
-        self._next_step = None
-        self._global_step_tensor = tf.train.get_global_step()
-        self._file_writer = tf.summary.FileWriterCache.get(self._output_dir)
-        if self._global_step_tensor is None:
-            raise RuntimeError("Global step should be created to use MetadataProfilerHook.")
-
-    def before_run(self, run_context):
-        self._request_summary = (
-                self._next_step is not None and
-                self._timer.should_trigger_for_step(self._next_step))
-        requests = {"global_step": self._global_step_tensor}
-        opts = (tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-                if self._request_summary else None)
-
-        return tf.train.SessionRunArgs(requests, options=opts)
-
-    def after_run(self, run_context, run_values):
-        stale_global_step = run_values.results["global_step"]
-        if self._next_step is None:
-            # Update the timer so that it does not activate until N steps or seconds
-            # have passed.
-            self._timer.update_last_triggered_step(stale_global_step)
-        global_step = stale_global_step + 1
-        if self._request_summary:
-            global_step = run_context.session.run(self._global_step_tensor)
-            self._timer.update_last_triggered_step(global_step)
-            self._file_writer.add_run_metadata(run_values.run_metadata, "step_%d" % global_step)
-
-        self._next_step = global_step + 1
-
-
-def matthews_correlation(y_true, y_pred):
-    cm = tf.confusion_matrix(y_true, y_pred)
-    if cm.shape[0] == 2 and cm.shape[1] == 2:
-        tp = cm[0][0]
-        tn = cm[1][1]
-
-        fp = cm[0][1]
-        fn = cm[1][0]
-    else:
-        tp = tf.constant(1E-9, dtype=tf.float32)
-        tn = tf.constant(1E-9, dtype=tf.float32)
-        fp = tf.constant(1E-9, dtype=tf.float32)
-        fn = tf.constant(1E-9, dtype=tf.float32)
-
-    numerator = tf.cast((tp * tn - fp * fn), tf.float32)
-    denominator = tf.sqrt(tf.cast((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn), tf.float32))
-
-    result = tf.divide(numerator, denominator)
-
-    return result, tf.group(tp, tn, fp, fn)
-
-
-def custom_metrics(labels, predictions):
-    return {
-        'matthews_correlation': matthews_correlation(labels, predictions['class_ids'])
-        # 'mean_labels': tf.metrics.mean(labels),
-        # 'mean_predictions': tf.metrics.mean(predictions['class_ids'])
-    }
 
 
 def run_prediction(estimator, predict_input_fn, start_id, output_file_path):
@@ -104,25 +30,143 @@ def main(args):
     if args.use_fake_data:
         tf.set_random_seed(12345)
 
-    all_train_files = tf.gfile.Glob(os.path.join(args.data_dir, "train-*.tfrecords"))
-    # number_of_train_files = int(args.train_eval_split*len(all_train_files)/100)
-    # train_files = all_train_files[:number_of_train_files]
-    # eval_files = all_train_files[number_of_train_files+1:]
-    predict_files = tf.gfile.Glob(os.path.join(args.data_dir, "test-*.tfrecords"))
-    # print("Eval files:", eval_files)
+    train_files = tf.gfile.Glob(os.path.join(args.data_dir, "train-*.tfrecords"))
+    if len(train_files) == 0:
+        tf.logging.log(tf.logging.INFO, 'Converting train data to TFRecord format:')
+        create_tf_records.convert_to_tf(signals_file_name=os.path.join(args.arrow_data_dir, 'train.parquet'),
+                                        metadata_file_name=os.path.join(args.arrow_data_dir, 'metadata_train.csv'),
+                                        target_tf_prefix=os.path.join(args.data_dir, 'train'),
+                                        batch_size=args.train_batch_size)
+        train_files = tf.gfile.Glob(os.path.join(args.data_dir, 'train-*.tfrecords'))
 
+    test_files = tf.gfile.Glob(os.path.join(args.data_dir, 'test-*.tfrecords'))
+    if len(test_files) == 0:
+        tf.logging.log(tf.logging.INFO, 'Converting test data to TFRecord format:')
+        create_tf_records.convert_to_tf(signals_file_name=os.path.join(args.arrow_data_dir, 'test.parquet'),
+                                        metadata_file_name=os.path.join(args.arrow_data_dir, 'metadata_test.csv'),
+                                        target_tf_prefix=os.path.join(args.data_dir, 'test'),
+                                        batch_size=args.train_batch_size)
+        test_files = tf.gfile.Glob(os.path.join(args.data_dir, 'test-*.tfrecords'))
+
+    # Augment data: add positive samples and save result for future runs.
+    positive_train_records = 525
     total_train_records = 8712
+    stats_folder = os.path.join(args.data_dir, 'stats')
+    os.makedirs(stats_folder, exist_ok=True)
+    preprocessed_train_files = tf.gfile.Glob(os.path.join(stats_folder, 'train-*.tfrecords'))
+    if len(preprocessed_train_files) == 0:
+
+        augmentation_need = (total_train_records - positive_train_records) // positive_train_records
+
+        train_all = dataset.original(train_files)
+
+        train_positives = train_all.filter(dataset.positives)
+        flipped_positives = train_positives.map(dataset.flip_map_func, num_parallel_calls=8)
+        train_augmented = train_positives.map(dataset.roll_map_func, num_parallel_calls=8)
+        for i in range(0, augmentation_need - 1, 2):
+            train_augmented = train_augmented.concatenate(
+                train_positives.map(dataset.roll_map_func, num_parallel_calls=8))
+            train_augmented = train_augmented.concatenate(
+                flipped_positives.map(dataset.roll_map_func, num_parallel_calls=8))
+        train_all = train_all.concatenate(train_augmented)
+
+        train_all = train_all.batch(args.preprocess_batch_size)\
+            .map(map_func=dataset.stats_map_func, num_parallel_calls=8).shuffle(buffer_size=20000)
+
+        target_tf_prefix = os.path.join(stats_folder, 'train')
+        batch_num = 0
+        with tf.Session() as sess:
+            positives_iterator = train_all.make_one_shot_iterator()
+            next_positive = positives_iterator.get_next()
+            while True:
+                try:
+                    features, labels = sess.run(next_positive)
+                    tf.logging.log(tf.logging.INFO, features['signal_id'])
+                    tf_records_file_name = target_tf_prefix + "-" + ("%05d" % batch_num) + '.tfrecords'
+                    batch_num += 1
+                    tf.logging.log(tf.logging.INFO, "Writing to :" + tf_records_file_name)
+                    with tf.python_io.TFRecordWriter(tf_records_file_name) as writer:
+                        for i in range(len(labels)):
+                            example_features = {
+                                'signal_id': dataset.int64_feature(features['signal_id'][i]),
+                                'id_measurement': dataset.int64_feature(features['id_measurement'][i]),
+                                'phase': dataset.int64_feature(features['phase'][i]),
+                                'stats_1': dataset.bytes_feature(features['stats_1'][i].tobytes()),
+                            }
+                            if 'target' in features:
+                                example_features['target'] = dataset.int64_feature(features['target'][i])
+                            example = tf.train.Example(features=tf.train.Features(feature=example_features))
+                            writer.write(example.SerializeToString())
+
+                except tf.errors.OutOfRangeError as e:
+                    # tf.logging.log(tf.logging.INFO, e)
+                    break
+        tf.logging.log(tf.logging.INFO, 'Train data preprocessing completed.')
+        preprocessed_train_files = tf.gfile.Glob(os.path.join(stats_folder, 'train-*.tfrecords'))
+
+    preprocessed_test_files = tf.gfile.Glob(os.path.join(stats_folder, 'test-*.tfrecords'))
+    if len(preprocessed_test_files) == 0:
+        test_all = dataset.original(test_files).batch(args.preprocess_batch_size)\
+            .map(map_func=dataset.stats_map_func, num_parallel_calls=8)
+        target_tf_prefix = os.path.join(stats_folder, 'test')
+        batch_num = 0
+        with tf.Session() as sess:
+            next_test = test_all.make_one_shot_iterator().get_next()
+            while True:
+                try:
+                    features, labels = sess.run(next_test)
+                    tf.logging.log(tf.logging.INFO, features['signal_id'])
+                    tf_records_file_name = target_tf_prefix + "-" + ("%05d" % batch_num) + '.tfrecords'
+                    batch_num += 1
+                    tf.logging.log(tf.logging.INFO, "Writing to :" + tf_records_file_name)
+                    with tf.python_io.TFRecordWriter(tf_records_file_name) as writer:
+                        for i in range(len(labels)):
+                            example_features = {
+                                'signal_id': dataset.int64_feature(features['signal_id'][i]),
+                                'id_measurement': dataset.int64_feature(features['id_measurement'][i]),
+                                'phase': dataset.int64_feature(features['phase'][i]),
+                                'stats_1': dataset.bytes_feature(features['stats_1'][i].tobytes()),
+                            }
+                            if 'target' in features:
+                                example_features['target'] = dataset.int64_feature(features['target'][i])
+                            example = tf.train.Example(features=tf.train.Features(feature=example_features))
+                            writer.write(example.SerializeToString())
+
+                except tf.errors.OutOfRangeError as e:
+                    # tf.logging.log(tf.logging.INFO, e)
+                    break
+        tf.logging.log(tf.logging.INFO, 'Test data preprocessing completed.')
+        preprocessed_test_files = tf.gfile.Glob(os.path.join(stats_folder, 'test-*.tfrecords'))
+
+    # total_train_records = 2560
     eval_split = int(args.train_eval_split * total_train_records / 100)
     total_eval_records = total_train_records - eval_split
 
+    def train_input_fn():
+        return dataset.original(preprocessed_train_files)\
+            .take(eval_split)\
+            .batch(args.train_batch_size).repeat()\
+            .prefetch(buffer_size=None)
+
+    def eval_input_fn():
+        return dataset.original(preprocessed_train_files)\
+            .skip(eval_split)\
+            .batch(args.eval_batch_size)\
+            .prefetch(buffer_size=None)
+
+    def test_input_fn():
+        return dataset.original(preprocessed_test_files)\
+            .batch(args.eval_batch_size)\
+            .prefetch(buffer_size=None)
+
     print("Train records: %d, Eval records: %d" % (eval_split, total_eval_records))
 
-    train_input_fn = dataset.get_input_fn(filename_queue=all_train_files, batch_size=args.train_batch_size,
-                                          take_count=eval_split, pos_weight=3.0, fake=args.use_fake_data)
-    eval_input_fn = dataset.get_input_fn(filename_queue=all_train_files, batch_size=args.eval_batch_size,
-                                         skip_count=eval_split, pos_weight=1.0, fake=args.use_fake_data)
-    predict_input_fn = dataset.get_input_fn(filename_queue=predict_files, batch_size=args.eval_batch_size,
-                                            predict=True, fake=args.use_fake_data)
+    # train_input_fn = dataset.get_input_fn(filename_queue=train_files, batch_size=args.train_batch_size,
+    #                                       take_count=eval_split, pos_weight=3.0, fake=args.use_fake_data)
+    # eval_input_fn = dataset.get_input_fn(filename_queue=train_files, batch_size=args.eval_batch_size,
+    #                                      skip_count=eval_split, pos_weight=1.0, fake=args.use_fake_data)
+    # predict_input_fn = dataset.get_input_fn(filename_queue=test_files, batch_size=args.eval_batch_size,
+    #                                         predict=True, fake=args.use_fake_data)
 
     # profiler_hook = tf.train.ProfilerHook(save_steps=args.save_summary_steps,
     #                                      output_dir=os.path.join(args.output_dir, 'profiler'),
@@ -131,27 +175,30 @@ def main(args):
 
     if args.save_session_metadata:
         train_hooks = [
-            MetadataProfilerHook(save_steps=args.save_summary_steps,
-                                 output_dir=args.output_dir)
+            model.MetadataProfilerHook(save_steps=args.save_summary_steps,
+                                       output_dir=args.output_dir)
         ]
     else:
         train_hooks = None
 
+    feature_columns = [
+        tf.feature_column.numeric_column(key='stats_1', shape=3040, dtype=tf.float32),
+    ]
+    features = {
+      'stats_1': tf.placeholder(dtype=tf.float32, shape=3040)
+    }
+    final_exporter = tf.estimator.FinalExporter('finalExporter',
+                                                tf.estimator.export.build_raw_serving_input_receiver_fn(features))
     os.makedirs(os.path.join(args.output_dir, 'export/finalExporter'), exist_ok=True)
+
     train_spec = tf.estimator.TrainSpec(input_fn=train_input_fn, max_steps=args.train_steps, hooks=train_hooks)
     eval_spec = tf.estimator.EvalSpec(input_fn=eval_input_fn,
-                                      steps=int(total_eval_records/args.eval_batch_size) + 1,
-                                      exporters=tf.estimator.FinalExporter('finalExporter', model.serving_input_fn),
+                                      steps=int(total_eval_records / args.eval_batch_size) + 1,
+                                      exporters=final_exporter,
                                       start_delay_secs=args.eval_delay_secs,
                                       throttle_secs=10)
 
-    feature_columns = [
-        # tf.feature_column.numeric_column(key='inception_v3', shape=2048, dtype=tf.float32),
-        # tf.feature_column.numeric_column(key='signal', shape=800000, dtype=tf.int8),
-        # tf.feature_column.numeric_column(key='input_1', shape=3040, dtype=tf.float32)
-        tf.feature_column.numeric_column(key='stats', shape=3040, dtype=tf.float32),
-        # tf.feature_column.numeric_column(key='weight', default_value=1, dtype=tf.int64)
-    ]
+
     h_params = {
         'feature_columns': feature_columns,
         'filters_1': 2, 'kernel_size_1': 9,
@@ -203,14 +250,13 @@ def main(args):
 
     estimator = tf.estimator.DNNClassifier(
         feature_columns=feature_columns,
-        weight_column='weight',
-        hidden_units=[1024, 512],
+        hidden_units=[2048, 1024, 512],
         model_dir=args.output_dir,
         config=run_config,
-        batch_norm=True,
-        dropout=0.5)
+        batch_norm=False,
+        dropout=0.7)
 
-    estimator = tf.contrib.estimator.add_metrics(estimator, custom_metrics)
+    estimator = tf.contrib.estimator.add_metrics(estimator, model.custom_metrics)
 
     # n_batches_per_layer = 0.5 * eval_split / args.train_batch_size
     # estimator = tf.estimator.BoostedTreesClassifier(
@@ -227,10 +273,15 @@ def main(args):
     # estimator.train(input_fn=train_input_fn, hooks=train_hooks, max_steps=args.train_steps)
     # evaluation_metrics = estimator.evaluate(input_fn=eval_input_fn, steps=args.eval_steps)
 
-    run_prediction(estimator=estimator, predict_input_fn=predict_input_fn, start_id=total_train_records,
+    run_prediction(estimator=estimator, predict_input_fn=test_input_fn, start_id=total_train_records,
                    output_file_path=os.path.join(args.output_dir, 'submission.csv'))
-    all_train_input_fn = dataset.get_input_fn(filename_queue=all_train_files, batch_size=args.train_batch_size,
-                                              fake=args.use_fake_data, predict=True)
+    # all_train_input_fn = dataset.get_input_fn(filename_queue=train_files, batch_size=args.train_batch_size,
+    #                                           fake=args.use_fake_data, predict=True)
+
+    def all_train_input_fn():
+        return dataset.original(preprocessed_train_files)\
+            .batch(args.eval_batch_size)\
+            .prefetch(buffer_size=None)
     run_prediction(estimator=estimator, predict_input_fn=all_train_input_fn, start_id=0,
                    output_file_path=os.path.join(args.output_dir, 'train-prediction.csv'))
 
@@ -240,6 +291,11 @@ if __name__ == '__main__':
     parser.add_argument(
         '--data_dir',
         help='GCS or local path to training data',
+        required=True
+    )
+    parser.add_argument(
+        '--arrow_data_dir',
+        help='GCS or local path to training data in pyarrow format',
         required=True
     )
     parser.add_argument(
@@ -257,6 +313,12 @@ if __name__ == '__main__':
     parser.add_argument(
         '--eval_batch_size',
         help='Batch size for evaluation steps',
+        type=int,
+        default=5
+    )
+    parser.add_argument(
+        '--preprocess_batch_size',
+        help='Batch size for data preprocessing',
         type=int,
         default=5
     )

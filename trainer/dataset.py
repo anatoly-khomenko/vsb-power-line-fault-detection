@@ -39,9 +39,13 @@ def dct_map_func(features, labels):
     return features, labels
 
 
+def class_map_func(features, labels):
+    return labels
+
+
 def stats_map_func(features, labels):
     ts = features['signal']
-    sample_size = tf.shape(ts)[1]
+    sample_size = tf.shape(ts)[-1]
     n_dim = 160
     bucket_size = tf.cast(sample_size / n_dim, dtype=tf.int32)
     max_num = 127
@@ -58,7 +62,7 @@ def stats_map_func(features, labels):
 
     def _body(j_v, i_v, all_stats_v):
         # cut each bucket to ts_range
-        ts_range = ts_std[:, i_v:i_v + bucket_size]
+        ts_range = ts_std[:, i_v:i_v + bucket_size]  # TODO: Make work also without batches ts_std - rank 0
         # calculate each feature
         mean, variance = tf.nn.moments(ts_range, axes=[1])
         std = tf.sqrt(variance)
@@ -86,6 +90,27 @@ def stats_map_func(features, labels):
     all_stats_tensor = tf.transpose(all_stats_tensor)
 
     features['stats_1'] = all_stats_tensor
+    return features, labels
+
+
+def roll_map_func(features, labels):
+    ts = features['signal']
+    ts_shape = tf.shape(ts)
+    high = tf.cast(ts_shape[0], dtype=tf.float32)
+    dist = tfp.distributions.Uniform(low=0, high=high, allow_nan_stats=False)
+    shift = tf.cast(dist.sample(), tf.int32)
+    ts = tf.roll(input=ts, shift=shift, axis=0)
+    features['signal'] = ts
+    features['id_measurement'] = features['id_measurement'] + 100000
+    features['signal_id'] = features['signal_id'] + 100000
+    return features, labels
+
+
+def flip_map_func(features, labels):
+    ts = features['signal']
+    features['signal'] = tf.math.scalar_mul(-1, ts)
+    features['id_measurement'] = features['id_measurement'] + 200000
+    features['signal_id'] = features['signal_id'] + 200000
     return features, labels
 
 
@@ -127,27 +152,15 @@ def _input_fn(filename_queue, batch_size=1, take_count=None, skip_count=None, po
         if fake:
             signal, weight, target = _generate_fake(predict=predict, pos_weight=pos_weight, target=target)
         else:
-            # read real signal which is 800K bytes and cast it to float 32
+            # read real signal which is 800K bytes
             signal = tf.decode_raw(parsed['signal'], tf.int8)
-            spectrum = tf.decode_raw(parsed['spectrum'], tf.float32)
-            parsed['spectrum'] = spectrum
-            inception_v3 = tf.decode_raw(parsed['inception_v3'], tf.float32)
-            parsed['inception_v3'] = inception_v3
-            stats = tf.decode_raw(parsed['stats'], tf.float64)
-            parsed['stats'] = stats
-            parsed['input_1'] = stats
+            parsed['spectrum'] = tf.decode_raw(parsed['spectrum'], tf.float32)
+            parsed['inception_v3'] = tf.decode_raw(parsed['inception_v3'], tf.float32)
+            parsed['stats'] = tf.decode_raw(parsed['stats'], tf.float64)
             if not predict:
                 weight = tf.cond(tf.math.equal(target, 1), lambda: pos_weight, lambda: 1.0)
                 parsed['weight'] = weight
         parsed['signal'] = signal
-        # parsed.pop('signal')
-        # parsed.pop('spectrum')
-        # parsed.pop('inception_v3')
-        # parsed.pop('stats')
-        # parsed.pop('weight')
-        # parsed.pop('id_measurement')
-        # parsed.pop('phase')
-        # parsed.pop('signal_id')
         return parsed, target
 
     dataset = tf.data.TFRecordDataset(filenames=filename_queue, num_parallel_reads=8)
@@ -161,9 +174,52 @@ def _input_fn(filename_queue, batch_size=1, take_count=None, skip_count=None, po
         dataset = dataset.apply(tf.contrib.data.shuffle_and_repeat(buffer_size=1000))
 
     dataset = dataset.apply(tf.contrib.data.map_and_batch(map_func=_parse_signal, batch_size=batch_size))
+    # dataset = dataset.apply(tf.data.experimental.rejection_resample(class_func=class_map_func,
+    #                                                                 target_dist=[0.5, 0.5],
+    #                                                                 initial_dist=[1-525/8712, 525/8712]))
+
     dataset = dataset.prefetch(buffer_size=None)
     # dataset = dataset.map(map_func=stats_map_func, num_parallel_calls=8)
+    # dataset = dataset.map(map_func=roll_map_func, num_parallel_calls=8)
+    # dataset = dataset.map(map_func=dct_map_func, num_parallel_calls=8)
+    # dataset = dataset.map(map_func=scale_map_func, num_parallel_calls=8)
     return dataset
+
+
+def original(filename_queue):
+    signal_feature_description = {
+        'signal_id': tf.FixedLenFeature([], tf.int64),
+        'id_measurement': tf.FixedLenFeature([], tf.int64),
+        'phase': tf.FixedLenFeature([], tf.int64),
+        'signal': tf.FixedLenFeature([], tf.string, ''),
+        'stats_1': tf.FixedLenFeature([], tf.string, ''),
+        # if no target given in metadata, initialize target with -1
+        'target': tf.FixedLenFeature([], tf.int64, -1)
+    }
+    signal_feature_encoded_types = {
+        'signal': tf.int8,
+        'stats_1': tf.float32
+    }
+
+    def _parse_signal(example_proto):
+        parsed = tf.parse_single_example(example_proto, signal_feature_description)
+        for key in signal_feature_encoded_types:
+            parsed[key] = tf.decode_raw(parsed[key], signal_feature_encoded_types[key])
+        return parsed, parsed['target']
+
+    dataset = tf.data.TFRecordDataset(filenames=filename_queue, num_parallel_reads=8)
+    dataset = dataset.map(map_func=_parse_signal, num_parallel_calls=8)
+    return dataset
+
+
+def positives(features, label):
+    """
+    This function only works with batches consisting of single examples
+    :param features: features of the example
+    :param label: label of the example
+    :return: True if the example is positive
+    """
+    return tf.reshape(tf.equal(label, 1), [])
 
 
 def get_input_fn(filename_queue, batch_size=1, take_count=None, skip_count=None, pos_weight=20.0, predict=False,
@@ -171,3 +227,10 @@ def get_input_fn(filename_queue, batch_size=1, take_count=None, skip_count=None,
     return lambda: _input_fn(filename_queue=filename_queue, batch_size=batch_size,
                              take_count=take_count, skip_count=skip_count, pos_weight=pos_weight, predict=predict,
                              fake=fake)
+
+
+def serving_input_fn():
+    features = {
+      'stats_1': tf.placeholder(dtype=tf.float32, shape=3040)
+    }
+    return tf.estimator.export.build_raw_serving_input_receiver_fn(features)

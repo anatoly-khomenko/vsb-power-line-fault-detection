@@ -5,6 +5,80 @@ from __future__ import print_function
 import tensorflow as tf
 
 
+class MetadataProfilerHook(tf.train.SessionRunHook):
+    def __init__(self,
+                 save_steps=None,
+                 save_secs=None,
+                 output_dir=""):
+        self._file_writer = None
+        self._next_step = None
+        self._global_step_tensor = None
+        self._request_summary = None
+        self._output_dir = output_dir
+        self._timer = tf.train.SecondOrStepTimer(every_secs=save_secs, every_steps=save_steps)
+
+    def begin(self):
+        self._next_step = None
+        self._global_step_tensor = tf.train.get_global_step()
+        self._file_writer = tf.summary.FileWriterCache.get(self._output_dir)
+        if self._global_step_tensor is None:
+            raise RuntimeError("Global step should be created to use MetadataProfilerHook.")
+
+    def before_run(self, run_context):
+        self._request_summary = (
+                self._next_step is not None and
+                self._timer.should_trigger_for_step(self._next_step))
+        requests = {"global_step": self._global_step_tensor}
+        opts = (tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+                if self._request_summary else None)
+
+        return tf.train.SessionRunArgs(requests, options=opts)
+
+    def after_run(self, run_context, run_values):
+        stale_global_step = run_values.results["global_step"]
+        if self._next_step is None:
+            # Update the timer so that it does not activate until N steps or seconds
+            # have passed.
+            self._timer.update_last_triggered_step(stale_global_step)
+        global_step = stale_global_step + 1
+        if self._request_summary:
+            global_step = run_context.session.run(self._global_step_tensor)
+            self._timer.update_last_triggered_step(global_step)
+            self._file_writer.add_run_metadata(run_values.run_metadata, "step_%d" % global_step)
+
+        self._next_step = global_step + 1
+
+
+def matthews_correlation(y_true, y_pred):
+    cm = tf.confusion_matrix(y_true, y_pred)
+    if cm.shape[0] == 2 and cm.shape[1] == 2:
+        tp = cm[0][0]
+        tn = cm[1][1]
+
+        fp = cm[0][1]
+        fn = cm[1][0]
+    else:
+        tp = tf.constant(1E-9, dtype=tf.float32)
+        tn = tf.constant(1E-9, dtype=tf.float32)
+        fp = tf.constant(1E-9, dtype=tf.float32)
+        fn = tf.constant(1E-9, dtype=tf.float32)
+
+    numerator = tf.cast((tp * tn - fp * fn), tf.float32)
+    denominator = tf.sqrt(tf.cast((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn), tf.float32))
+
+    result = tf.divide(numerator, denominator)
+
+    return result, tf.group(tp, tn, fp, fn)
+
+
+def custom_metrics(labels, predictions):
+    return {
+        'matthews_correlation': matthews_correlation(labels, predictions['class_ids'])
+        # 'mean_labels': tf.metrics.mean(labels),
+        # 'mean_predictions': tf.metrics.mean(predictions['class_ids'])
+    }
+
+
 def lstm_with_attention_model_fn(features, labels, mode, params):
     input_layer = features['stats']
     # reshape to [batches, time series, channels]
@@ -226,8 +300,3 @@ def cnn_model_fn(features, labels, mode, params):
         train_op = optimizer.minimize(loss, global_step=global_step)
         return tf.estimator.EstimatorSpec(mode, loss=loss, train_op=train_op)
 
-
-def serving_input_fn():
-    features = {'signal': tf.placeholder(dtype=tf.float32, shape=2048)}
-    receiver_tensors = {'signal': tf.placeholder(dtype=tf.float32, shape=2048)}
-    return tf.estimator.export.ServingInputReceiver(features, receiver_tensors)

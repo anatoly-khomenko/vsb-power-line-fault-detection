@@ -327,7 +327,7 @@ best_threshold = threshold_search(y_val, preds_val)['threshold']
 meta_test = pd.read_csv('../../input/metadata_test.csv')
 
 meta_test = meta_test.set_index(['signal_id'])
-meta_test.head()
+print(meta_test.head())
 
 
 # %%time

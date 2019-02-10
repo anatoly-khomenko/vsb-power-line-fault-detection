@@ -14,7 +14,6 @@ import time
 import pandas as pd
 # noinspection PyPackageRequirements
 from pyarrow import parquet as pq
-import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
 
@@ -35,46 +34,6 @@ def read_parquet(name, cols=None):
     return table
 
 
-def min_max_transf(ts, min_data, max_data, range_needed=(-1, 1)):
-    if min_data < 0:
-        ts_std = (ts + abs(min_data)) / (max_data + abs(min_data))
-    else:
-        ts_std = (ts - min_data) / (max_data - min_data)
-    if range_needed[0] < 0:
-        return ts_std * (range_needed[1] + abs(range_needed[0])) + range_needed[0]
-    else:
-        return ts_std * (range_needed[1] - range_needed[0]) + range_needed[0]
-
-
-def calc_stats(ts, n_dim=160, min_max=(-1, 1)):
-    max_num = 127
-    min_num = -128
-    sample_size = 800000
-    # convert data into -1 to 1
-    ts_std = min_max_transf(ts, min_data=min_num, max_data=max_num)
-    # bucket or chunk size, 5000 in this case (800000 / 160)
-    bucket_size = int(sample_size / n_dim)
-    # new_ts will be the container of the new data
-    new_ts = []
-    # this for interact any chunk/bucket until reach the whole sample_size (800000)
-    for i in range(0, sample_size, bucket_size):
-        # cut each bucket to ts_range
-        ts_range = ts_std[i:i + bucket_size]
-        # calculate each feature
-        mean = ts_range.mean()
-        std = ts_range.std()  # standard deviation
-        std_top = mean + std  # I have to test it more, but is is like a band
-        std_bot = mean - std
-        # I think that the percentiles are very important, it is like a distribution analysis from each chunk
-        percentil_calc = np.percentile(ts_range, [0, 1, 25, 50, 75, 99, 100])
-        max_range = percentil_calc[-1] - percentil_calc[0]  # this is the amplitude of the chunk
-        relative_percentile = percentil_calc - mean  # maybe it could heap to understand the asymmetry
-        # now, we just add all the features to new_ts and convert it to np.array
-        new_ts.append(np.concatenate(
-            [np.asarray([mean, std, std_top, std_bot, max_range]), percentil_calc, relative_percentile]))
-    return np.asarray(new_ts)
-
-
 def _create_examples(id_measurement, metadata, signals_parq):
     examples = []
     for phase in [0, 1, 2]:
@@ -90,15 +49,12 @@ def _create_examples(id_measurement, metadata, signals_parq):
             # get underlying NumPy array from pandas Series and it's bytes representation.
             # No data transformation happens here.
             signal_bytes = signal_pandas.values.tobytes()
-            # Add statistics data
-            stats = calc_stats(signal_pandas)
             # construct Example to store in TFRecord
             features_dict = {
                 'signal_id': dataset.int64_feature(signal_id),
                 'id_measurement': dataset.int64_feature(id_measurement),
                 'phase': dataset.int64_feature(phase),
                 'signal': dataset.bytes_feature(signal_bytes),
-                'stats':  dataset.bytes_feature(stats.tobytes())
             }
             # no target given in test metadata, in this case no target feature will be present
             if target is not None:

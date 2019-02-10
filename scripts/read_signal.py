@@ -39,7 +39,7 @@ def filter_signal(source, lower_freq, upper_freq, signal_duration=2.0E-2) -> (np
 
 def plot_all(y, batch_columns):
     n = len(y)
-    c = len(batch_columns)
+    c = len(batch_columns)+1
     fig, axs = plt.subplots(n, c)
     for i in range(n):
         if y[i]['target'] == 1:
@@ -49,37 +49,34 @@ def plot_all(y, batch_columns):
         else:
             color = 'blue'
         col = 0
-        axs[i][col].plot(y[i]['signal'], color=color)
-        col += 1
-        if 'spectrum' in y[i]:
-            axs[i][col].matshow(y[i]['spectrum'], cmap=plt.get_cmap('cool'))
-            col += 1
-        if 'inception_v3' in y[i]:
-            axs[i][col].plot(y[i]['inception_v3'], color=color)
-            col += 1
-        if 'stats' in y[i]:
-            axs[i][col].plot(y[i]['stats'], color=color)
-            col += 1
-        if 'stats_1' in y[i]:
-            axs[i][col].plot(y[i]['stats_1'], color=color)
+        for column in batch_columns:
+            if len(y[i][column].shape) == 2:
+                axs[i][col].matshow(y[i][column], cmap=plt.get_cmap('cool'))
+            elif len(y[i][column].shape) == 3:
+                axs[i][col].imshow(y[i][column], cmap=plt.get_cmap('cool'))
+            else:
+                axs[i][col].plot(y[i][column], color=color)
+            axs[i][col].title.set_text(column)
             col += 1
     plt.ion()
     plt.show(block=True)
 
 
-def plot_dataset(parsed_signal_dataset, sess, batch_size=10, total_batches=1):
+def plot_dataset(parsed_signal_dataset, sess, batch_size=10, total_batches=1, alternate=True):
     next_target = None
-    # structure is "signal_id":
-    # {'id_measurement': tf.int64,
+    # signals structure is [
+    # {'signal_id': tf.int64,
+    #  'id_measurement': tf.int64,
     #  'phase': tf.int64,
     #  'signal': tf.int8,
     #  'spectrum': tf.float32,
     #  'inception_v3': tf.float32,
     #  'stats': tf.float32,
     #  'target': tf.int64
-    # }
+    # }]
     signals = []
-    batch_columns = set()
+    batch_columns = []
+    columns = ['signal', 'spectrum', 'inception_v3', 'stats', 'stats_1', 'rolled', 'scaled']
 
     iterator = parsed_signal_dataset.make_one_shot_iterator()
 
@@ -91,18 +88,16 @@ def plot_dataset(parsed_signal_dataset, sess, batch_size=10, total_batches=1):
     while current_batch < total_batches:
         try:
             features, labels = sess.run(next_element)
-            id_measurements = features['id_measurement']
-            phases = features['phase']
-            signal_ids = features['signal_id']
-            signal_numpys = features['signal']
-            spectrum_numpys = features['spectrum']
-            inception_v3_numpys = features['inception_v3']
-            stats_numpys = features['stats']
-            stats_1_numpys = features['stats_1']
-            for i in range(len(signal_ids)):
+            if not isinstance(labels, list):
+                labels = [labels]
+                new_features = {}
+                for key in features:
+                    new_features[key] = [features[key]]
+                features = new_features
+            for i in range(len(labels)):
                 if next_target is None:
                     next_target = labels[i]
-                if next_target == labels[i]:
+                if not alternate or next_target == labels[i]:
                     if labels[i] == 0:
                         next_target = 1
                     elif labels[i] == -1:
@@ -110,25 +105,17 @@ def plot_dataset(parsed_signal_dataset, sess, batch_size=10, total_batches=1):
                     else:
                         next_target = 0
                     signal = {
-                         'id_measurement': id_measurements[i],
-                         'phase': phases[i]
+                         'signal_id': features['signal_id'][i],
+                         'id_measurement': features['id_measurement'][i],
+                         'phase': features['phase'][i],
+                         'target': labels[i]
                     }
-                    if len(signal_numpys[i]) > 0:
-                        signal['signal'] = signal_numpys[i]
-                        batch_columns.add('signal')
-                    if len(spectrum_numpys[i]) > 0:
-                        signal['spectrum'] = spectrum_numpys[i]
-                        batch_columns.add('spectrum')
-                    if len(inception_v3_numpys[i]) > 0:
-                        signal['inception_v3'] = inception_v3_numpys[i]
-                        batch_columns.add('inception_v3')
-                    if len(stats_numpys[i]) > 0:
-                        signal['stats'] = stats_numpys[i]
-                        batch_columns.add('stats')
-                    if len(stats_1_numpys[i]) > 0:
-                        signal['stats_1'] = stats_1_numpys[i]
-                        batch_columns.add('stats_1')
-                    signal['target'] = labels[i]
+                    for column in columns:
+                        if column in features and len(features[column][i]) > 0:
+                            signal[column] = features[column][i]
+                            if column not in batch_columns:
+                                batch_columns.append(column)
+
                     signals.append(signal)
 
                     current_item = current_item + 1
@@ -174,11 +161,12 @@ FLAGS = []
 def main(unused_argv):
     start = current_milli_time()
     train_files = glob.glob(os.path.join(FLAGS.source_directory, "train-*.tfrecords"))
-    train_input_fn = dataset.get_input_fn(filename_queue=train_files,
-                                          batch_size=FLAGS.batch_size,
-                                          predict=FLAGS.predict,
-                                          fake=FLAGS.fake)
-    train_dataset = train_input_fn()
+    # train_input_fn = dataset.get_input_fn(filename_queue=train_files,
+    #                                       batch_size=FLAGS.batch_size,
+    #                                       predict=FLAGS.predict,
+    #                                       fake=FLAGS.fake)
+    # train_dataset = train_input_fn()
+    train_dataset = dataset.original(filename_queue=train_files)
     # transform dataset records
     # train_dataset = train_dataset.map(map_func=dataset.stats_map_func, num_parallel_calls=8)
     end = current_milli_time()
@@ -188,15 +176,16 @@ def main(unused_argv):
             print('Measuring train dataset performance')
             measure_performance(parsed_signal_dataset=train_dataset, sess=sess, total_batches=FLAGS.total_batches)
         else:
-            plot_dataset(train_dataset, sess, FLAGS.batch_size, FLAGS.total_batches)
+            plot_dataset(train_dataset, sess, FLAGS.batch_size, FLAGS.total_batches, FLAGS.alternate)
     start = current_milli_time()
     test_files = glob.glob(os.path.join(FLAGS.source_directory, "test-*.tfrecords"))
-    test_input_fn = dataset.get_input_fn(filename_queue=test_files,
-                                         batch_size=FLAGS.batch_size,
-                                         predict=FLAGS.predict,
-                                         fake=FLAGS.fake)
-    test_dataset = test_input_fn()
+    # test_input_fn = dataset.get_input_fn(filename_queue=test_files,
+    #                                      batch_size=FLAGS.batch_size,
+    #                                      predict=FLAGS.predict,
+    #                                      fake=FLAGS.fake)
+    # test_dataset = test_input_fn()
     # test_dataset = test_dataset.map(map_func=dataset.stats_map_func, num_parallel_calls=8)
+    test_dataset = dataset.original(filename_queue=test_files)
     end = current_milli_time()
 
     print('Created test dataset in ', end - start, 'ms.')
@@ -205,7 +194,7 @@ def main(unused_argv):
             print('Measuring test dataset performance')
             measure_performance(parsed_signal_dataset=test_dataset, sess=sess, total_batches=FLAGS.total_batches)
         else:
-            plot_dataset(test_dataset, sess, FLAGS.batch_size, FLAGS.total_batches)
+            plot_dataset(test_dataset, sess, FLAGS.batch_size, FLAGS.total_batches, FLAGS.alternate)
 
 
 if __name__ == '__main__':
@@ -227,7 +216,7 @@ if __name__ == '__main__':
         help='Generate fake signals (data are read from disk anyways)'
     )
     parser.add_argument(
-        '--vary',
+        '--alternate',
         action="store_true",
         help='Take one negative than one positive sample when plotting'
     )
